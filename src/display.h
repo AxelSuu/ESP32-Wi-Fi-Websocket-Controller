@@ -2,10 +2,7 @@
 
 #include <Adafruit_SSD1327.h>
 
-// ------------------- DISPLAY INSTANCE -------------------
 extern Adafruit_SSD1327 display;
-
-// ------------------- DISPLAY FUNCTIONS -------------------
 
 /*
 Initializes the OLED display.

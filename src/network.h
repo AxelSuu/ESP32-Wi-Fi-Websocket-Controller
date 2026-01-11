@@ -1,7 +1,5 @@
 #pragma once
 
-// ------------------- NETWORK FUNCTIONS -------------------
-
 /*
 Initializes WiFi AP, HTTP server, and WebSocket server.
 */

@@ -36,8 +36,6 @@ extern Ball ball;
 extern int playerScore;
 extern int enemyScore;
 
-// ------------------- GAME FUNCTIONS -------------------
-
 /*
 Resets the ball to the center of the screen with initial speed.
 */
