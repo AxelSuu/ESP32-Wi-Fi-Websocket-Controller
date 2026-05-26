@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>ESP32 Pong Controller</title>
   <style>
-    body { 
-      text-align: center; 
-      font-family: sans-serif; 
+    body {
+      text-align: center;
+      font-family: sans-serif;
       margin-top: 160px;
       touch-action: manipulation;
     }
-    button { 
-      font-size: 96px; 
-      padding: 80px; 
+    button {
+      font-size: 96px;
+      padding: 80px;
       margin: 40px;
       width: 400px;
       height: 300px;
@@ -43,9 +43,9 @@
 <body>
   <h2>ESP32 Pong Controller</h2>
   <div id="status" class="disconnected">Connecting...</div>
-  
+
   <button class="start-btn" onclick="startGame()">START GAME</button><br><br>
-  
+
   <button class="control-btn" onclick="send('up')">Up</button><br>
   <button class="control-btn" onclick="send('down')">Down</button>
 
@@ -56,21 +56,20 @@
     const statusEl = document.getElementById('status');
 
     function connect() {
-      socket = new WebSocket("ws://" + location.hostname + ":81/");
-      
+      socket = new WebSocket("ws://" + location.hostname + "/ws");
+
       socket.onopen = () => {
         console.log("Connected to ESP32 WebSocket");
         statusEl.textContent = "Connected";
         statusEl.className = "connected";
         reconnectAttempts = 0;
       };
-      
+
       socket.onclose = () => {
         console.log("Disconnected");
         statusEl.textContent = "Disconnected - Reconnecting...";
         statusEl.className = "disconnected";
-        
-        // Attempt to reconnect with exponential backoff
+
         if (reconnectAttempts < maxReconnectAttempts) {
           const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
           reconnectAttempts++;
@@ -80,13 +79,12 @@
           statusEl.textContent = "Connection failed - Refresh page";
         }
       };
-      
+
       socket.onerror = (error) => {
         console.error("WebSocket error:", error);
       };
     }
 
-    // Initial connection
     connect();
 
     function send(dir) {
