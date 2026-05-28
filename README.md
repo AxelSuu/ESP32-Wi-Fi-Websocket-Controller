@@ -1,6 +1,6 @@
-# ESP32 Wi-Fi Pong
+## ESP32 Wi-Fi Websocket controller
 
-This is an embedded wireless pong game written in `C` using `esp-idf`: a Wi-Fi softAP, an `SPIFFS`-hosted web UI, and a WebSocket server for real-time control. It combines low-level peripheral access (SPI display) with networking and filesystem services to build an interactive embedded web application. Running on `http://192.168.4.1` with Wi-Fi password `12345678`
+This is an embedded wireless Wi-Fi Websocket controller written in C using esp-idf. a Wi-Fi softAP, an SPIFFS-hosted web UI, and a WebSocket server for real-time control. It combines low-level peripheral access (SPI display) with networking and filesystem services to build an interactive embedded web application. Running on http://192.168.4.1 with Wi-Fi password 12345678
 
 ## Hardware
 
