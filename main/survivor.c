@@ -1,6 +1,7 @@
 #include "survivor.h"
 #include "display.h"
 #include "fx.h"
+#include "pick.h"
 #include "hw_config.h"
 #include "esp_random.h"
 #include <stdio.h>
@@ -22,7 +23,7 @@
 
 // Upgrade kinds offered at level-up.
 enum { UPG_FIRERATE, UPG_DAMAGE, UPG_MULTISHOT, UPG_PIERCE, UPG_SPEED, UPG_HP, UPG_COUNT };
-static const char *UPG_NAME[UPG_COUNT] = {
+static const char *const UPG_NAME[UPG_COUNT] = {
     "FIRE RATE", "DAMAGE", "MULTISHOT", "PIERCE", "SPEED", "MAX HP"
 };
 
@@ -47,10 +48,7 @@ static float    s_bullet_speed, s_move_speed;
 static int      s_spawn_acc;
 static uint32_t s_last_boss;
 
-// level-up choice
-static bool     s_leveling;
-static int      s_choices[3];
-static int      s_choice_idx;
+static pick_t   s_pick;          // level-up choice
 
 static enemy_t  s_enemy[MAX_ENEMIES];
 static bullet_t s_bullet[MAX_BULLETS];
@@ -72,7 +70,7 @@ static void survivor_reset(void)
     s_kills = 0;
     s_run_ms = 0;
     s_over = false;
-    s_leveling = false;
+    s_pick.open = false;
 
     s_fire_interval = 600;
     s_fire_acc = 0;
@@ -105,41 +103,24 @@ static void apply_upgrade(int u)
     }
 }
 
-static void start_levelup(void)
-{
-    s_leveling   = true;
-    s_choice_idx = 0;
-    // Pick 3 distinct upgrade kinds.
-    for (int i = 0; i < 3; i++) {
-        int u;
-        bool dup;
-        do {
-            u = (int)(frnd() * UPG_COUNT);
-            if (u >= UPG_COUNT) u = UPG_COUNT - 1;
-            dup = (i > 0 && (u == s_choices[0] || (i > 1 && u == s_choices[1])));
-        } while (dup);
-        s_choices[i] = u;
-    }
-    fx_flash();
-}
-
 static void survivor_on_input(const input_event_t *ev)
 {
     if (ev->player != 0) return;
-    if (s_leveling) {
-        if (ev->kind == INPUT_NAV) {
-            int dir = (ev->analog < 0) ? -1 : 1;
-            s_choice_idx = (s_choice_idx + dir + 3) % 3;
-        } else if (ev->kind == INPUT_SELECT || ev->kind == INPUT_PRIMARY) {
-            apply_upgrade(s_choices[s_choice_idx]);
-            s_leveling = false;
-        }
+    if (s_pick.open) {
+        int u = pick_input(&s_pick, ev);
+        if (u >= 0) apply_upgrade(u);
         return;
     }
     if (ev->kind == INPUT_MOVE) {
         s_dirx = clampf(ev->analog, -1.0f, 1.0f);
         s_diry = clampf(ev->analog2, -1.0f, 1.0f);
     }
+}
+
+// Phone dropped: let go of the stick so the run doesn't resume mid-drag.
+static void survivor_on_leave(int player)
+{
+    if (player == 0) s_dirx = s_diry = 0;
 }
 
 static void spawn_enemy(uint32_t now)
@@ -205,7 +186,8 @@ static void fire(void)
 
 static void survivor_tick(uint32_t dt_ms)
 {
-    if (s_over || s_leveling) return;     // level-up pauses the world
+    if (s_over) return;
+    if (s_pick.open) { pick_tick(&s_pick, dt_ms); return; }   // level-up pauses the world
     s_run_ms += dt_ms;
     if (s_invuln > 0) s_invuln -= (int)dt_ms;
 
@@ -274,7 +256,7 @@ static void survivor_tick(uint32_t dt_ms)
         if (d < MAGNET && d > 0.01f) { s_gem[g].x += dx / d * 1.6f; s_gem[g].y += dy / d * 1.6f; }
         if (d < 4.0f) {
             s_gem[g].alive = false;
-            if (++s_xp >= s_xp_next) { s_xp -= s_xp_next; s_xp_next += 3; s_level++; start_levelup(); }
+            if (++s_xp >= s_xp_next) { s_xp -= s_xp_next; s_xp_next += 3; s_level++; pick_open(&s_pick, UPG_COUNT); }
         }
     }
 }
@@ -306,19 +288,7 @@ static void survivor_render(void)
     if (s_invuln <= 0 || (s_invuln / 80) & 1)             // blink while invulnerable
         gfx_circle((int)s_px, (int)s_py, 2, 0xF);
 
-    // Level-up overlay.
-    if (s_leveling) {
-        gfx_rect(8, 24, SCREEN_WIDTH - 16, 56, 0x0);
-        gfx_frame(8, 24, SCREEN_WIDTH - 16, 56, 0xF);
-        int x = (SCREEN_WIDTH - gfx_text_width("LEVEL UP", 1)) / 2;
-        gfx_text(x, 28, "LEVEL UP", 0xF);
-        for (int i = 0; i < 3; i++) {
-            int y = 40 + i * 12;
-            bool sel = (i == s_choice_idx);
-            if (sel) gfx_rect(10, y - 1, SCREEN_WIDTH - 20, 11, 0x4);
-            gfx_text(14, y, UPG_NAME[s_choices[i]], sel ? 0xF : 0xA);
-        }
-    }
+    pick_render(&s_pick, "LEVEL UP", UPG_NAME);
 }
 
 static bool survivor_is_over(void) { return s_over; }
@@ -333,6 +303,7 @@ const game_module_t SURVIVOR = {
     .controls    = "[{\"w\":\"joystick\"},{\"w\":\"pick\"}]",
     .reset       = survivor_reset,
     .on_input    = survivor_on_input,
+    .on_leave    = survivor_on_leave,
     .tick        = survivor_tick,
     .render      = survivor_render,
     .is_over     = survivor_is_over,

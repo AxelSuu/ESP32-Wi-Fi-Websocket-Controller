@@ -5,7 +5,11 @@
 // Build & run:  make -C test/host run
 #include <stdio.h>
 #include "game_module.h"
+#include "gfx.h"
+#include "hw_config.h"
 #include "menu.h"
+#include "pick.h"
+#include "proto.h"
 #include "mock.h"
 
 extern const game_module_t PONG;
@@ -31,6 +35,72 @@ static void send(const game_module_t *g, input_kind_t kind, int player)
     g->on_input(&ev);
 }
 
+// One 30 ms tick that also confirms any open upgrade pick. The pick ignores
+// confirms that arrive faster than its guard, so press every ~0.5 s like a player.
+static void tick_through_picks(const game_module_t *g, int i)
+{
+    if (i % 16 == 0) send(g, INPUT_SELECT, 0);
+    g->tick(30);
+}
+
+// --- Upgrade picker (shared by Survivor / Descender / Runner) ---
+
+static int pick_press(pick_t *p, input_kind_t kind)
+{
+    input_event_t ev = {.kind = kind, .player = 0};
+    return pick_input(p, &ev);
+}
+
+static void test_pick_choices_distinct(void)
+{
+    printf("pick: offers three distinct in-range kinds\n");
+    mock_random_reset();
+    int ok = 1;
+    for (int n = 0; n < 200; n++) {
+        pick_t p = {0};
+        pick_open(&p, 3 + n % 4);
+        for (int i = 0; i < 3; i++)
+            if (p.choices[i] < 0 || p.choices[i] >= 3 + n % 4) ok = 0;
+        if (p.choices[0] == p.choices[1] || p.choices[0] == p.choices[2] ||
+            p.choices[1] == p.choices[2]) ok = 0;
+    }
+    CHECK(ok, "every draw is three distinct kinds below n_kinds");
+}
+
+static void test_pick_guard(void)
+{
+    printf("pick: early confirm is ignored, arrows choose, later confirm applies\n");
+    mock_random_reset();
+    pick_t p = {0};
+    pick_open(&p, 5);
+    CHECK(pick_press(&p, INPUT_PRIMARY) == -1 && p.open, "confirm right as it opens is ignored");
+    for (int t = 0; t < 400; t += 30) pick_tick(&p, 30);
+    pick_press(&p, INPUT_RIGHT);
+    CHECK(p.idx == 1, "RIGHT moves the highlight");
+    pick_press(&p, INPUT_LEFT);
+    pick_press(&p, INPUT_LEFT);
+    CHECK(p.idx == 2, "LEFT wraps around");
+    int want = p.choices[2];
+    CHECK(pick_press(&p, INPUT_PRIMARY) == want, "confirm after the guard returns the highlighted kind");
+    CHECK(!p.open, "overlay closes on confirm");
+}
+
+static void test_pick_held_fire(void)
+{
+    printf("pick: holding FIRE through the overlay never auto-picks\n");
+    mock_random_reset();
+    pick_t p = {0};
+    pick_open(&p, 5);
+    int picked = -1;
+    for (int t = 0; t < 2000 && picked < 0; t += 30) {   // auto-repeat every ~60 ms
+        if ((t / 30) % 2 == 0) picked = pick_press(&p, INPUT_PRIMARY);
+        pick_tick(&p, 30);
+    }
+    CHECK(picked == -1 && p.open, "held FIRE keeps the overlay open");
+    for (int t = 0; t < 400; t += 30) pick_tick(&p, 30);
+    CHECK(pick_press(&p, INPUT_PRIMARY) >= 0, "a fresh press after letting go confirms");
+}
+
 // --- Pong (drives to completion; AI vs a stationary player) ---
 
 static void test_pong_reaches_a_valid_winner(void)
@@ -49,6 +119,45 @@ static void test_pong_reaches_a_valid_winner(void)
     CHECK(PONG.is_over(), "pong ends within the tick budget");
     int w = PONG.winner();
     CHECK(w == 0 || w == 1, "winner is a valid player id");
+}
+
+// Topmost lit row of the right paddle's column (render goes to the real gfx buffer).
+static int right_paddle_top(void)
+{
+    gfx_clear(0);
+    PONG.render();
+    for (int y = 0; y < SCREEN_HEIGHT; y++)
+        if (gfx_get_pixel(SCREEN_WIDTH - 7, y)) return y;
+    return -1;
+}
+
+static void test_pong_ai_retakes_paddle(void)
+{
+    printf("pong: the AI takes the right paddle back when the 2nd phone leaves\n");
+    mock_random_reset();
+    mock_clock_reset();
+    PONG.reset();
+    for (int i = 0; i < 5; i++) send(&PONG, INPUT_UP, 1);   // 2nd phone parks it at the top
+    for (int i = 0; i < 8; i++) PONG.tick(30);
+    CHECK(right_paddle_top() == 0, "while the 2nd phone is in, the AI leaves its paddle alone");
+    PONG.on_leave(1);
+    for (int i = 0; i < 8; i++) PONG.tick(30);
+    CHECK(right_paddle_top() > 0, "after it leaves, the AI tracks the ball again");
+}
+
+// --- Controller descriptors ---
+
+static void test_active_messages_fit(void)
+{
+    printf("descriptors: every game's active message fits its buffer\n");
+    const game_module_t *all[] = {&SURVIVOR, &DESCENDER, &PUZZLER, &RUNNER, &PONG};
+    int ok = 1;
+    for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) {
+        char buf[PROTO_ACTIVE_MAX];
+        int  n = proto_fmt_active(buf, sizeof buf, all[i]->id, all[i]->min_players, all[i]->controls);
+        if (n < 0 || n >= (int)sizeof buf) { ok = 0; printf("    %s needs %d bytes\n", all[i]->id, n); }
+    }
+    CHECK(ok, "no active message is truncated");
 }
 
 // --- Menu scroll window (pure helper from menu.h) ---
@@ -85,10 +194,7 @@ static void test_survivor_survival_scores(void)
     printf("survivor: surviving accrues score over time\n");
     mock_random_reset();
     SURVIVOR.reset();
-    for (int i = 0; i < 100; i++) {       // ~3 s; clear any level-up so the sim keeps running
-        send(&SURVIVOR, INPUT_SELECT, 0);
-        SURVIVOR.tick(30);
-    }
+    for (int i = 0; i < 100; i++) tick_through_picks(&SURVIVOR, i);   // ~3 s
     CHECK(SURVIVOR.score() >= 3, "score reflects ~3 s of survival");
     CHECK(SURVIVOR.winner() == -1, "still no winner");
 }
@@ -121,11 +227,7 @@ static void test_descender_attrition_ends(void)
     mock_random_reset();
     DESCENDER.reset();
     int ticks = 0;
-    while (!DESCENDER.is_over() && ticks < 20000) {
-        send(&DESCENDER, INPUT_SELECT, 0);   // clear any upgrade pick so the sim keeps running
-        DESCENDER.tick(30);
-        ticks++;
-    }
+    while (!DESCENDER.is_over() && ticks < 20000) tick_through_picks(&DESCENDER, ticks++);
     CHECK(DESCENDER.is_over(), "run ends within the tick budget (spiky enemies damage a passive player)");
     CHECK(DESCENDER.winner() == -1, "single-player: no winner");
 }
@@ -195,11 +297,7 @@ static void test_runner_crash_ends(void)
     mock_random_reset();
     RUNNER.reset();
     int ticks = 0;
-    while (!RUNNER.is_over() && ticks < 20000) {
-        send(&RUNNER, INPUT_SELECT, 0);   // clear any perk pick so the sim keeps running
-        RUNNER.tick(30);
-        ticks++;
-    }
+    while (!RUNNER.is_over() && ticks < 20000) tick_through_picks(&RUNNER, ticks++);
     CHECK(RUNNER.is_over(), "run ends within the tick budget (an aligned rock with no shield)");
     CHECK(RUNNER.winner() == -1, "single-player: no winner");
 }
@@ -207,6 +305,9 @@ static void test_runner_crash_ends(void)
 int main(void)
 {
     test_menu_window();
+    test_pick_choices_distinct();
+    test_pick_guard();
+    test_pick_held_fire();
     test_survivor_reset();
     test_survivor_survival_scores();
     test_descender_reset();
@@ -219,6 +320,8 @@ int main(void)
     test_runner_distance_scores();
     test_runner_crash_ends();
     test_pong_reaches_a_valid_winner();
+    test_pong_ai_retakes_paddle();
+    test_active_messages_fit();
 
     printf("\n%s (%d failure%s)\n", g_fail ? "TESTS FAILED" : "ALL TESTS PASSED", g_fail,
            g_fail == 1 ? "" : "s");

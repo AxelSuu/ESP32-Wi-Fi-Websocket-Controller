@@ -1,6 +1,7 @@
 #include "descender.h"
 #include "display.h"
 #include "fx.h"
+#include "pick.h"
 #include "hw_config.h"
 #include "esp_random.h"
 #include <stdio.h>
@@ -28,7 +29,7 @@
 #define BULLET_SPD  3.4f         // downward bullet speed
 
 enum { UPG_FIRERATE, UPG_DAMAGE, UPG_MULTISHOT, UPG_HP, UPG_BOUNCE, UPG_COUNT };
-static const char *UPG_NAME[UPG_COUNT] = { "FIRE RATE", "DAMAGE", "MULTISHOT", "MAX HP", "STOMP+" };
+static const char *const UPG_NAME[UPG_COUNT] = { "FIRE RATE", "DAMAGE", "MULTISHOT", "MAX HP", "STOMP+" };
 
 typedef struct { float x, wy; int hp; bool alive; bool boss; bool spiky; } enemy_t;
 typedef struct { float x, wy; bool alive; } bullet_t;
@@ -54,9 +55,8 @@ static int      s_spawn_acc;
 static uint32_t s_last_boss;
 
 // upgrade choice
-static bool     s_leveling;
+static pick_t   s_pick;
 static float    s_next_seg;
-static int      s_choices[3], s_choice_idx;
 
 static enemy_t  s_enemy[MAX_ENEMIES];
 static bullet_t s_bullet[MAX_BULLETS];
@@ -86,9 +86,8 @@ static void descender_reset(void)
     s_spawn_acc = 0;
     s_last_boss = 0;
 
-    s_leveling = false;
+    s_pick.open = false;
     s_next_seg = SEGMENT;
-    s_choice_idx = 0;
 
     for (int i = 0; i < MAX_ENEMIES; i++) s_enemy[i].alive = false;
     for (int i = 0; i < MAX_BULLETS; i++) s_bullet[i].alive = false;
@@ -106,23 +105,6 @@ static void apply_upgrade(int u)
     case UPG_HP:        s_maxhp++; s_hp++;                   break;
     case UPG_BOUNCE:    s_bounce += 0.6f;                    break;
     }
-}
-
-static void start_levelup(void)
-{
-    s_leveling   = true;
-    s_choice_idx = 0;
-    for (int i = 0; i < 3; i++) {
-        int u;
-        bool dup;
-        do {
-            u = (int)(frnd() * UPG_COUNT);
-            if (u >= UPG_COUNT) u = UPG_COUNT - 1;
-            dup = (i > 0 && (u == s_choices[0] || (i > 1 && u == s_choices[1])));
-        } while (dup);
-        s_choices[i] = u;
-    }
-    fx_flash();
 }
 
 static void fire(void)
@@ -144,14 +126,9 @@ static void fire(void)
 static void descender_on_input(const input_event_t *ev)
 {
     if (ev->player != 0) return;
-    if (s_leveling) {
-        if (ev->kind == INPUT_NAV) {
-            int dir = (ev->analog < 0) ? -1 : 1;
-            s_choice_idx = (s_choice_idx + dir + 3) % 3;
-        } else if (ev->kind == INPUT_SELECT || ev->kind == INPUT_PRIMARY) {
-            apply_upgrade(s_choices[s_choice_idx]);
-            s_leveling = false;
-        }
+    if (s_pick.open) {
+        int u = pick_input(&s_pick, ev);
+        if (u >= 0) apply_upgrade(u);
         return;
     }
     switch (ev->kind) {
@@ -161,6 +138,12 @@ static void descender_on_input(const input_event_t *ev)
     case INPUT_PRIMARY: fire();                                            break;
     default: break;
     }
+}
+
+// Phone dropped: centre the steering so the run doesn't resume mid-tilt.
+static void descender_on_leave(int player)
+{
+    if (player == 0) s_steer = 0;
 }
 
 static void spawn_enemy(void)
@@ -190,7 +173,8 @@ static void kill_enemy(int e)
 
 static void descender_tick(uint32_t dt_ms)
 {
-    if (s_over || s_leveling) return;     // the upgrade pick pauses the world
+    if (s_over) return;
+    if (s_pick.open) { pick_tick(&s_pick, dt_ms); return; }   // the upgrade pick pauses the world
     s_run_ms += dt_ms;
     if (s_invuln > 0) s_invuln -= (int)dt_ms;
     if (s_fire_cd > 0) s_fire_cd -= (int)dt_ms;
@@ -208,7 +192,7 @@ static void descender_tick(uint32_t dt_ms)
     if (d > s_depth) s_depth = d;
 
     // Cross a depth segment -> offer an upgrade.
-    if (s_wy >= s_next_seg) { s_next_seg += SEGMENT; start_levelup(); return; }
+    if (s_wy >= s_next_seg) { s_next_seg += SEGMENT; pick_open(&s_pick, UPG_COUNT); return; }
 
     // Spawn cadence ramps with depth.
     int interval = 900 - s_depth * 3;
@@ -300,19 +284,7 @@ static void descender_render(void)
         gfx_pixel(px, PLAYER_ROW, 0xF);
     }
 
-    // Upgrade overlay.
-    if (s_leveling) {
-        gfx_rect(8, 24, SCREEN_WIDTH - 16, 56, 0x0);
-        gfx_frame(8, 24, SCREEN_WIDTH - 16, 56, 0xF);
-        int x = (SCREEN_WIDTH - gfx_text_width("UPGRADE", 1)) / 2;
-        gfx_text(x, 28, "UPGRADE", 0xF);
-        for (int i = 0; i < 3; i++) {
-            int y = 40 + i * 12;
-            bool sel = (i == s_choice_idx);
-            if (sel) gfx_rect(10, y - 1, SCREEN_WIDTH - 20, 11, 0x4);
-            gfx_text(14, y, UPG_NAME[s_choices[i]], sel ? 0xF : 0xA);
-        }
-    }
+    pick_render(&s_pick, "UPGRADE", UPG_NAME);
 }
 
 static bool descender_is_over(void) { return s_over; }
@@ -325,9 +297,10 @@ const game_module_t DESCENDER = {
     .min_players = 1,
     .scored      = true,
     .controls    = "[{\"w\":\"tilt\"},{\"w\":\"dpad\",\"dirs\":[\"left\",\"right\"]},"
-                   "{\"w\":\"btn\",\"label\":\"FIRE\",\"ev\":\"primary\"}]",
+                   "{\"w\":\"btn\",\"label\":\"FIRE\",\"ev\":\"primary\",\"hold\":1}]",
     .reset       = descender_reset,
     .on_input    = descender_on_input,
+    .on_leave    = descender_on_leave,
     .tick        = descender_tick,
     .render      = descender_render,
     .is_over     = descender_is_over,

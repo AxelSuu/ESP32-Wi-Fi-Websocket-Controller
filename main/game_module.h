@@ -35,6 +35,7 @@ typedef struct {
 
     void (*reset)(void);                       // start a fresh round
     void (*on_input)(const input_event_t *ev); // handle one input event
+    void (*on_leave)(int player);              // optional: that player's phone dropped mid-round
     void (*tick)(uint32_t dt_ms);              // advance the simulation
     void (*render)(void);                      // draw the world via gfx_* (no clear/present)
     bool (*is_over)(void);                     // round finished?

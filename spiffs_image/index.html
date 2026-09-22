@@ -101,6 +101,8 @@
 
     /* generic controller host + widgets */
     #gamectl { flex: 1; display: flex; flex-direction: column; gap: var(--gap); min-height: 0; }
+    /* held game buttons: no pan/zoom gesture (would cancel the hold), no iOS callout */
+    #gamectl button { touch-action: none; -webkit-touch-callout: none; }
     .tiltwrap { display: flex; flex-direction: column; gap: var(--gap); }
     .dpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--gap); flex: 0 0 auto; }
     .dpad .dcell { display: flex; }
@@ -248,6 +250,7 @@
     }
 
     function setSurface(m) {
+      stopHolds();
       mode = m;
       document.querySelectorAll('.surface').forEach(s => {
         s.classList.toggle('active', s.dataset.mode === m);
@@ -281,8 +284,33 @@
     function press(ev) { send({ t: 'input', ev: ev }); beep(660, 30); if (navigator.vibrate) navigator.vibrate(12); }
     function sendTilt(g) { send({ t: 'tilt', g: Math.round(g * 100) / 100 }); }
 
-    // --- analog joystick (Survivor): drag → normalized (x, y), throttled ~30 Hz ---
-    let joyActive = false, lastMove = 0;
+    // --- press-and-hold: game buttons act on touch-down, not release. A hold control
+    // also auto-repeats (silently) while held. Every surface change stops all holds,
+    // so a button hidden mid-press can't keep sending.
+    const HOLD_DELAY = 160, HOLD_RATE = 60;
+    const holds = new Set();
+    function stopHolds() { holds.forEach(stop => stop()); }
+    function bindPress(b, ev, hold) {
+      let delay, rep;
+      const stop = () => { clearTimeout(delay); clearInterval(rep); holds.delete(stop); };
+      b.addEventListener('pointerdown', e => {
+        e.preventDefault();
+        stop();
+        press(ev);
+        if (!hold) return;
+        holds.add(stop);
+        delay = setTimeout(() => { rep = setInterval(() => send({ t: 'input', ev: ev }), HOLD_RATE); }, HOLD_DELAY);
+      });
+      ['pointerup', 'pointercancel', 'pointerleave', 'lostpointercapture']
+        .forEach(t => b.addEventListener(t, stop));
+    }
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stopHolds(); });
+    window.addEventListener('blur', stopHolds);
+
+    // --- analog joystick (Survivor): drag → normalized (x, y), throttled ~30 Hz.
+    // The newest position is always sent (trailing flush), so a stick that stops
+    // between throttle windows isn't left reporting a stale vector.
+    let joyActive = false, lastMove = 0, joyVecNow = null, joyTimer = null;
     function joyVec(ev) {
       const r = document.getElementById('joybase').getBoundingClientRect();
       const t = ev.touches && ev.touches[0] ? ev.touches[0] : ev;
@@ -296,21 +324,27 @@
     function joyMove(ev) {
       if (!joyActive) return;
       ev.preventDefault();
-      const now = Date.now();
-      if (now - lastMove < 33) return;
-      lastMove = now;
-      const v = joyVec(ev);
+      joyVecNow = joyVec(ev);
       const thumb = document.getElementById('joythumb');
-      thumb.style.left = (50 + v.dx * 40) + '%';
-      thumb.style.top  = (50 + v.dy * 40) + '%';
-      send({ t: 'move', x: Math.round(v.dx * 100) / 100, y: Math.round(v.dy * 100) / 100 });
+      thumb.style.left = (50 + joyVecNow.dx * 40) + '%';
+      thumb.style.top  = (50 + joyVecNow.dy * 40) + '%';
+      const wait = 33 - (Date.now() - lastMove);
+      if (wait <= 0) joyFlush();
+      else if (!joyTimer) joyTimer = setTimeout(joyFlush, wait);
+    }
+    function joyFlush() {
+      clearTimeout(joyTimer); joyTimer = null;
+      if (!joyActive || !joyVecNow) return;
+      lastMove = Date.now();
+      send({ t: 'move', x: Math.round(joyVecNow.dx * 100) / 100, y: Math.round(joyVecNow.dy * 100) / 100 });
     }
     function joyEnd(ev) {
       ev.preventDefault();
+      if (!joyActive) return;
       joyActive = false;
-      const thumb = document.getElementById('joythumb');
-      thumb.style.left = '50%';
-      thumb.style.top = '50%';
+      clearTimeout(joyTimer); joyTimer = null;
+      const thumb = document.getElementById('joythumb');   // gone if the surface changed mid-drag
+      if (thumb) { thumb.style.left = '50%'; thumb.style.top = '50%'; }
       send({ t: 'move', x: 0, y: 0 });
     }
     function setBrightness(v, save) { send({ t: 'brightness', v: Number(v), save: save ? 1 : 0 }); }
@@ -332,6 +366,7 @@
 
     // --- generic controller: build the active game's surface from its descriptor ---
     function renderControls(spec) {
+      stopHolds();
       const host = document.getElementById('gamectl');
       host.innerHTML = '';
       let widgets = [];
@@ -340,7 +375,7 @@
         if (w.w === 'joystick')   host.appendChild(buildJoystick());
         else if (w.w === 'tilt')  host.appendChild(buildTilt());
         else if (w.w === 'dpad')  host.appendChild(buildDpad(w.dirs || []));
-        else if (w.w === 'btn')   host.appendChild(buildButton(w.label || '?', w.ev || 'primary'));
+        else if (w.w === 'btn')   host.appendChild(buildButton(w.label || '?', w.ev || 'primary', !!w.hold));
         else if (w.w === 'pick')  host.appendChild(buildPick());
       });
     }
@@ -353,9 +388,11 @@
       base.addEventListener('touchstart', joyStart, { passive: false });
       base.addEventListener('touchmove',  joyMove,  { passive: false });
       base.addEventListener('touchend',   joyEnd,   { passive: false });
+      base.addEventListener('touchcancel', joyEnd,  { passive: false });
       base.addEventListener('mousedown',  joyStart);
       base.addEventListener('mousemove',  joyMove);
       base.addEventListener('mouseup',    joyEnd);
+      base.addEventListener('mouseleave', joyEnd);
       pad.appendChild(base);
       return pad;
     }
@@ -382,7 +419,7 @@
         const cell = document.createElement('div'); cell.className = 'dcell';
         if (d && has(d)) {
           const b = document.createElement('button'); b.className = 'accent';
-          b.innerHTML = glyph[d]; b.onclick = () => press(d);
+          b.innerHTML = glyph[d]; bindPress(b, d, true);
           cell.appendChild(b);
         }
         pad.appendChild(cell);
@@ -390,9 +427,9 @@
       return pad;
     }
 
-    function buildButton(label, ev) {
+    function buildButton(label, ev, hold) {
       const b = document.createElement('button'); b.className = 'accent gamebtn';
-      b.innerHTML = label; b.onclick = () => press(ev);
+      b.innerHTML = label; bindPress(b, ev, hold);
       return b;
     }
 
@@ -500,6 +537,7 @@
       };
       socket.onmessage = (e) => onMessage(e.data);
       socket.onclose = () => {
+        stopHolds();
         statusEl.textContent = "DISCONNECTED — RECONNECTING…";
         statusEl.className = "disconnected";
         clearInterval(pingTimer);

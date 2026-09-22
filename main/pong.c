@@ -92,6 +92,12 @@ static void pong_on_input(const input_event_t *ev)
     }
 }
 
+// The 2nd phone dropped: hand the right paddle back to the AI.
+static void pong_on_leave(int player)
+{
+    if (player == 1) s_p1_joined = false;
+}
+
 static bool pong_is_over(void)
 {
     return s_player_score >= WIN_SCORE || s_enemy_score >= WIN_SCORE;
@@ -136,8 +142,11 @@ static void pong_tick(uint32_t dt_ms)
     s_ball.x += s_ball.dx;
     s_ball.y += s_ball.dy;
 
-    // Wall collisions (top/bottom)
-    if (s_ball.y - s_ball.r <= 0 || s_ball.y + s_ball.r >= SCREEN_HEIGHT) {
+    // Wall collisions (top/bottom). Only reflect a ball heading into the wall: a
+    // paddle deflection can leave it overlapping one, and an unconditional flip
+    // would then jitter it along the edge every frame.
+    if ((s_ball.y - s_ball.r <= 0 && s_ball.dy < 0) ||
+        (s_ball.y + s_ball.r >= SCREEN_HEIGHT && s_ball.dy > 0)) {
         s_ball.dy *= -1;
     }
 
@@ -237,10 +246,11 @@ const game_module_t PONG = {
     .title       = "PONG",
     .min_players = 1,
     .scored      = false,    // win-based (first to 3)
-    .controls    = "[{\"w\":\"btn\",\"label\":\"&#9650; UP\",\"ev\":\"up\"},"
-                   "{\"w\":\"btn\",\"label\":\"&#9660; DOWN\",\"ev\":\"down\"}]",
+    .controls    = "[{\"w\":\"btn\",\"label\":\"&#9650; UP\",\"ev\":\"up\",\"hold\":1},"
+                   "{\"w\":\"btn\",\"label\":\"&#9660; DOWN\",\"ev\":\"down\",\"hold\":1}]",
     .reset       = pong_reset,
     .on_input    = pong_on_input,
+    .on_leave    = pong_on_leave,
     .tick        = pong_tick,
     .render      = pong_render,
     .is_over     = pong_is_over,

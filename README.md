@@ -36,6 +36,11 @@ menu entry (with a device-side reset). Left idle on the attract screen, the cons
 until a second phone connects, which takes over the right paddle (a mid-round disconnect drops it
 back to AI).
 
+If P1's phone drops mid-game (screen lock, Wi-Fi blip), the game **pauses** on the OLED and
+resumes when it reconnects; with no phone at all for 2 minutes it returns to the attract screen.
+Game buttons act on touch-down, and the d-pad (plus Pong's UP/DOWN and Descender's FIRE)
+**auto-repeats while held**.
+
 The controller also shows **round-trip latency** in its footer, plays WebAudio blips, has a
 reconnect toast, and a **brightness** slider in the ⚙ menu (saved to NVS). Your last-played
 game is remembered across reboots.
@@ -103,7 +108,8 @@ Pins live in [`main/hw_config.h`](main/hw_config.h).
 ```
 
 - A **game is one `game_module_t` vtable** (`reset` / `on_input` / `tick` / `render` /
-  `is_over` / `winner`) defined in its own `.c`, with all mutable state file-static.
+  `is_over` / `winner` / `score`, optional `on_leave`) defined in its own `.c`, with all
+  mutable state file-static.
 - **`display.c` knows nothing about games** — it exposes generic `gfx_*` primitives
   (`gfx_clear/pixel/rect/circle/text`, `display_present`). The engine draws the menu &
   game-over card; each game draws its own world.
@@ -141,13 +147,14 @@ it doesn't understand. Clients ignore unknown fields, so additive changes don't 
 | `welcome` | `player`: 0/1                       | assigned player slot |
 | `system_info` | `version`: string               | firmware version (sent right after `welcome`) |
 | `screen`  | `mode`:`menu`, `games`:[labels], `idx`:n | menu state → **phone mirrors the OLED menu** |
-| `active`  | `game`: id, `players`: n            | a game launched → **phone morphs its controls** |
+| `active`  | `game`: id, `players`: n, `controls`: [widgets] | a game launched → **phone morphs its controls** |
 | `waiting` | `need`: n, `have`: n                | 2-player game waiting for the second phone |
 | `over`    | `winner`: -1/0/1, `score`: int      | round ended (`winner` -1 = none/draw; `score` -1 = n/a) |
 | `pong`    | `ts`: echoed timestamp              | reply to `ping`; client computes round-trip latency |
 
-The `active` message drives the controller morph — the phone JS swaps its control surface
-based on `game`. The `screen` message mirrors the on-device menu so the phone shows the live
+The `active` message drives the controller morph — the phone builds its control surface
+from the `controls` descriptor, a list of widgets: `joystick`, `tilt`, `pick` (◀ PICK ▶),
+`dpad` (`dirs`), and `btn` (`label`, `ev`, and `hold:1` to auto-repeat while held). The `screen` message mirrors the on-device menu so the phone shows the live
 game list with the highlighted entry (instead of blind Up/Down). On `over`, single-player
 games (Survivor/Descender/Blocks/Runner) report a `score` and the phone shows `Score: n`. The web controller keeps
 an exponential-backoff reconnect and buzzes (`navigator.vibrate`) on input and round end.

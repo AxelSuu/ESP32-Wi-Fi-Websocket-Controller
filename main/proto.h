@@ -31,6 +31,7 @@ int proto_fmt_welcome(char *buf, size_t cap, int player);
 int proto_fmt_system_info(char *buf, size_t cap, const char *version);
 int proto_fmt_active(char *buf, size_t cap, const char *game_id, int players,
                      const char *controls);
+#define PROTO_ACTIVE_MAX 256   // buffer for an `active` message; every game's must fit
 int proto_fmt_waiting(char *buf, size_t cap, int need, int have);
 int proto_fmt_over(char *buf, size_t cap, int winner, int score);
 

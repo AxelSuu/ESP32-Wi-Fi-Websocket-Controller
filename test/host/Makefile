@@ -10,7 +10,7 @@ CFLAGS  ?= -std=c11 -Wall -Wextra -O1 -g
 ROOT    := ../..
 MAIN    := $(ROOT)/main
 INCS       := -I$(MAIN) -Imock
-GAME_SRCS  := $(MAIN)/pong.c $(MAIN)/survivor.c $(MAIN)/descender.c $(MAIN)/puzzler.c $(MAIN)/runner.c $(MAIN)/gfx.c stubs.c test_games.c
+GAME_SRCS  := $(MAIN)/pick.c $(MAIN)/proto.c $(MAIN)/pong.c $(MAIN)/survivor.c $(MAIN)/descender.c $(MAIN)/puzzler.c $(MAIN)/runner.c $(MAIN)/gfx.c stubs.c test_games.c
 PROTO_SRCS := $(MAIN)/proto.c test_proto.c
 GFX_SRCS   := $(MAIN)/gfx.c test_gfx.c
 BINS       := game_tests proto_tests gfx_tests

@@ -119,6 +119,15 @@ int net_player_count(void)
     return n;
 }
 
+bool net_player_connected(int player)
+{
+    if (player < 0 || player >= MAX_WS_CLIENTS) return false;
+    xSemaphoreTake(s_ws_fd_mutex, portMAX_DELAY);
+    bool on = (s_ws_fds[player] != -1);
+    xSemaphoreGive(s_ws_fd_mutex);
+    return on;
+}
+
 // Release a client slot and notify the engine — idempotent, so the graceful
 // CLOSE-frame path and the close_fn safety net can both call it. Runs on the
 // httpd task; never holds the engine mutex, so the engine may take it freely.
@@ -193,7 +202,7 @@ void net_broadcast_json(const char *json)
 
 void net_broadcast_active(const char *game_id, int players, const char *controls)
 {
-    char buf[256];
+    char buf[PROTO_ACTIVE_MAX];
     proto_fmt_active(buf, sizeof buf, game_id, players, controls);
     ws_broadcast(buf);
 }
@@ -219,6 +228,12 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (req->method == HTTP_GET) {
         int fd   = httpd_req_to_sockfd(req);
         int slot = ws_fd_add(fd);
+        if (slot < 0) {
+            // Every player slot is taken. Refuse rather than let this phone's
+            // input masquerade as another player's; its page retries later.
+            ESP_LOGW(TAG, "WS fd=%d refused: all %d player slots in use", fd, MAX_WS_CLIENTS);
+            return ESP_FAIL;
+        }
         ESP_LOGI(TAG, "WS handshake fd=%d slot=%d", fd, slot);
         return ESP_OK;
     }
@@ -260,7 +275,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (!proto_find_str(msg, "t", t, sizeof t)) return ESP_OK;
 
     int player = slot_of_fd(fd);
-    if (player < 0) player = 0;
+    if (player < 0) return ESP_OK;         // not a slotted client
 
     if (strcmp(t, "hello") == 0) {
         char w[40];
@@ -356,8 +371,8 @@ static esp_err_t index_handler(httpd_req_t *req)
 }
 
 // OTA over the SoftAP: the controller POSTs a raw firmware .bin here; we stream
-// it into the inactive OTA slot, mark it bootable, and reboot. No rollback is
-// configured, so the new image just boots on success.
+// it into the inactive OTA slot, mark it bootable, and reboot. The new image
+// boots PENDING_VERIFY and is confirmed by ota_mark_valid_if_pending() in main.c.
 static esp_err_t update_handler(httpd_req_t *req)
 {
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);

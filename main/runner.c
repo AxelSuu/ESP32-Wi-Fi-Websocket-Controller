@@ -1,6 +1,7 @@
 #include "runner.h"
 #include "display.h"
 #include "fx.h"
+#include "pick.h"
 #include "hw_config.h"
 #include "esp_random.h"
 #include <stdio.h>
@@ -22,7 +23,7 @@
 
 enum { OB_ROCK, OB_COIN, OB_SHIELD, OB_SLOW };
 enum { PERK_MULT, PERK_MAGNET, PERK_BRAKE, PERK_COINVAL, PERK_COUNT };
-static const char *PERK_NAME[PERK_COUNT] = { "SCORE x", "MAGNET", "BRAKE", "RICH COINS" };
+static const char *const PERK_NAME[PERK_COUNT] = { "SCORE x", "MAGNET", "BRAKE", "RICH COINS" };
 
 typedef struct { float x, y; bool alive; bool passed; int kind; } obs_t;
 
@@ -37,9 +38,8 @@ static int      s_invuln;
 static int      s_spawn_acc;
 static bool     s_over;
 
-static bool     s_leveling;
+static pick_t   s_pick;
 static int      s_next_perk;
-static int      s_choices[3], s_choice_idx;
 
 static obs_t    s_obs[MAX_OBS];
 
@@ -57,9 +57,8 @@ static void runner_reset(void)
     s_invuln = 0;
     s_spawn_acc = 0;
     s_over = false;
-    s_leveling = false;
+    s_pick.open = false;
     s_next_perk = PERK_DIST;
-    s_choice_idx = 0;
     for (int i = 0; i < MAX_OBS; i++) s_obs[i].alive = false;
 }
 
@@ -73,34 +72,12 @@ static void apply_perk(int p)
     }
 }
 
-static void start_perk(void)
-{
-    s_leveling   = true;
-    s_choice_idx = 0;
-    for (int i = 0; i < 3; i++) {
-        int p;
-        bool dup;
-        do {
-            p = (int)(frnd() * PERK_COUNT);
-            if (p >= PERK_COUNT) p = PERK_COUNT - 1;
-            dup = (i > 0 && (p == s_choices[0] || (i > 1 && p == s_choices[1])));
-        } while (dup);
-        s_choices[i] = p;
-    }
-    fx_flash();
-}
-
 static void runner_on_input(const input_event_t *ev)
 {
     if (ev->player != 0) return;
-    if (s_leveling) {
-        if (ev->kind == INPUT_NAV) {
-            int dir = (ev->analog < 0) ? -1 : 1;
-            s_choice_idx = (s_choice_idx + dir + 3) % 3;
-        } else if (ev->kind == INPUT_SELECT || ev->kind == INPUT_PRIMARY) {
-            apply_perk(s_choices[s_choice_idx]);
-            s_leveling = false;
-        }
+    if (s_pick.open) {
+        int p = pick_input(&s_pick, ev);
+        if (p >= 0) apply_perk(p);
         return;
     }
     switch (ev->kind) {
@@ -109,6 +86,12 @@ static void runner_on_input(const input_event_t *ev)
     case INPUT_RIGHT: s_px = clampf(s_px + 6.0f, RX0, RX1);            break;
     default: break;
     }
+}
+
+// Phone dropped: centre the steering so the run doesn't resume mid-tilt.
+static void runner_on_leave(int player)
+{
+    if (player == 0) s_steer = 0;
 }
 
 static void spawn_obs(void)
@@ -130,7 +113,8 @@ static void spawn_obs(void)
 
 static void runner_tick(uint32_t dt_ms)
 {
-    if (s_over || s_leveling) return;
+    if (s_over) return;
+    if (s_pick.open) { pick_tick(&s_pick, dt_ms); return; }
     if (s_invuln > 0)  s_invuln  -= (int)dt_ms;
     if (s_slow_ms > 0) s_slow_ms -= (int)dt_ms;
 
@@ -146,7 +130,7 @@ static void runner_tick(uint32_t dt_ms)
     s_distf += speed * step;
     s_dist = (int)(s_distf / 4.0f);
 
-    if (s_dist >= s_next_perk) { s_next_perk += PERK_DIST; start_perk(); return; }
+    if (s_dist >= s_next_perk) { s_next_perk += PERK_DIST; pick_open(&s_pick, PERK_COUNT); return; }
 
     int interval = 520 - s_dist * 2;
     if (interval < 220) interval = 220;
@@ -221,18 +205,7 @@ static void runner_render(void)
 
     if (s_slow_ms > 0) gfx_text(SCREEN_WIDTH - 30, SCREEN_HEIGHT - 8, "SLOW", 0x8);
 
-    if (s_leveling) {
-        gfx_rect(8, 24, SCREEN_WIDTH - 16, 56, 0x0);
-        gfx_frame(8, 24, SCREEN_WIDTH - 16, 56, 0xF);
-        int x = (SCREEN_WIDTH - gfx_text_width("PERK", 1)) / 2;
-        gfx_text(x, 28, "PERK", 0xF);
-        for (int i = 0; i < 3; i++) {
-            int y = 40 + i * 12;
-            bool sel = (i == s_choice_idx);
-            if (sel) gfx_rect(10, y - 1, SCREEN_WIDTH - 20, 11, 0x4);
-            gfx_text(14, y, PERK_NAME[s_choices[i]], sel ? 0xF : 0xA);
-        }
-    }
+    pick_render(&s_pick, "PERK", PERK_NAME);
 }
 
 static bool runner_is_over(void) { return s_over; }
@@ -247,6 +220,7 @@ const game_module_t RUNNER = {
     .controls    = "[{\"w\":\"tilt\"},{\"w\":\"dpad\",\"dirs\":[\"left\",\"right\"]},{\"w\":\"pick\"}]",
     .reset       = runner_reset,
     .on_input    = runner_on_input,
+    .on_leave    = runner_on_leave,
     .tick        = runner_tick,
     .render      = runner_render,
     .is_over     = runner_is_over,

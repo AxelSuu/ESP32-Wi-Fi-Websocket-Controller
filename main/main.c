@@ -51,8 +51,9 @@ static void game_task(void *arg)
     }
 
     ESP_LOGI(TAG, "Network ready, starting engine loop");
-    int  healthy = 0;
-    bool marked  = false;
+    int        healthy = 0;
+    bool       marked  = false;
+    TickType_t wake    = xTaskGetTickCount();
     for (;;) {
         engine_update(FRAME_MS);
         engine_render();
@@ -61,7 +62,12 @@ static void game_task(void *arg)
             ota_mark_valid_if_pending();
             marked = true;
         }
-        vTaskDelay(pdMS_TO_TICKS(FRAME_MS));
+        // Fixed FRAME_MS cadence (the sim advances FRAME_MS per frame). vTaskDelay
+        // counts from "now", so a frame whose work crossed a tick boundary ran a
+        // whole tick long; DelayUntil absorbs work time up to FRAME_MS. After a
+        // long stall (e.g. flash writes) resync instead of bursting catch-up frames.
+        if (xTaskDelayUntil(&wake, pdMS_TO_TICKS(FRAME_MS)) == pdFALSE)
+            wake = xTaskGetTickCount();
     }
 }
 

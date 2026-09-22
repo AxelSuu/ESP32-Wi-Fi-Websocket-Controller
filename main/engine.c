@@ -33,6 +33,7 @@ static const game_module_t *const s_games[] = { &SURVIVOR, &DESCENDER, &PUZZLER,
 #define DEFAULT_BRIGHTNESS 0x80
 #define WIPE_FRAMES        6       // length of the state-change wipe transition
 #define DEMO_IDLE_MS       12000   // idle time on attract before the self-play demo
+#define ABANDON_MS         120000  // nobody connected this long → give up any other screen
 
 static int                  s_menu_idx;
 static const game_module_t *s_active;
@@ -48,8 +49,9 @@ static volatile int         s_pending_brightness = -1;  // set by httpd task, ap
 static volatile int         s_pending_persist    = 0;   // also save to NVS when applying
 static app_state_t          s_render_prev = APP_MENU;   // for detecting state changes (wipe)
 static int                  s_wipe;                      // remaining wipe-transition frames
-static uint32_t             s_idle_ms;                   // attract idle accumulator (→ demo)
+static uint32_t             s_idle_ms;                   // nobody-connected time (→ demo / abandon)
 static bool                 s_confirm_reset;             // high-score reset confirmation
+static int                  s_best[N_GAMES];             // RAM mirror of the NVS high scores
 
 void engine_init(void)
 {
@@ -65,6 +67,15 @@ void engine_init(void)
     s_menu_idx = persist_get_last_game(0);
     if (s_menu_idx < 0 || s_menu_idx >= N_GAMES) s_menu_idx = 0;
     display_set_contrast((uint8_t)persist_get_brightness(DEFAULT_BRIGHTNESS));
+
+    // The menu and score screens show bests every frame; read NVS once here.
+    for (int i = 0; i < N_GAMES; i++) s_best[i] = persist_get_highscore(s_games[i]->id);
+}
+
+static int game_index(const game_module_t *g)
+{
+    for (int i = 0; i < N_GAMES; i++) if (s_games[i] == g) return i;
+    return 0;
 }
 
 // Called from the httpd task; the actual SSD1327 write is deferred to the render
@@ -135,16 +146,20 @@ void engine_update(uint32_t dt_ms)
     xSemaphoreTake(s_engine_mutex, portMAX_DELAY);
     s_anim_ms += dt_ms;               // drives the attract-screen animation
 
-    // Idle attract → self-playing Pong demo after a while; reset the timer
-    // whenever someone's connected or we're not on the attract screen.
-    if (s_app == APP_MENU && net_player_count() == 0) {
+    // Nobody connected: the attract screen drops into the self-playing Pong demo,
+    // and any other screen (e.g. a paused game) is given up after a while so a
+    // static frame isn't left burning into the OLED.
+    if (net_player_count() == 0 && s_app != APP_DEMO) {
         s_idle_ms += dt_ms;
-        if (s_idle_ms >= DEMO_IDLE_MS) {
+        if (s_app == APP_MENU && s_idle_ms >= DEMO_IDLE_MS) {
             s_idle_ms = 0;
             s_active  = &PONG;
             s_active->reset();
             pong_set_demo(true);
             s_app = APP_DEMO;
+        } else if (s_app != APP_MENU && s_idle_ms >= ABANDON_MS) {
+            s_idle_ms = 0;
+            s_app = APP_MENU;
         }
     } else {
         s_idle_ms = 0;
@@ -155,7 +170,9 @@ void engine_update(uint32_t dt_ms)
         if (s_active->is_over()) s_active->reset();   // keep the demo looping
     }
 
-    if (s_app == APP_PLAYING && s_active) {
+    // The game is paused while P1's phone is away (screen lock, Wi-Fi blip) and
+    // resumes as soon as that slot reconnects.
+    if (s_app == APP_PLAYING && s_active && net_player_connected(0)) {
         s_active->tick(dt_ms);
         if (s_active->is_over()) {
             s_last_winner = s_active->winner();
@@ -163,13 +180,13 @@ void engine_update(uint32_t dt_ms)
             s_new_best    = false;
             s_last_best   = -1;
             if (s_last_score >= 0) {                 // scored (single-player) game
-                int best = persist_get_highscore(s_active->id);
-                if (s_last_score > best) {
-                    best = s_last_score;
-                    persist_set_highscore(s_active->id, best);
+                int gi = game_index(s_active);
+                if (s_last_score > s_best[gi]) {
+                    s_best[gi] = s_last_score;
+                    persist_set_highscore(s_active->id, s_last_score);
                     s_new_best = true;
                 }
-                s_last_best = best;
+                s_last_best = s_best[gi];
             }
             fx_flash();              // arcade death punch (game task; safe vs fx_update)
             fx_shake(3, 8);
@@ -206,7 +223,10 @@ void engine_dispatch_input(const input_event_t *ev)
                 s_confirm_reset = true;                 // first press: ask
             } else {                                    // second press: do it
                 for (int i = 0; i < N_GAMES; i++)
-                    if (s_games[i]->scored) persist_set_highscore(s_games[i]->id, 0);
+                    if (s_games[i]->scored) {
+                        s_best[i] = 0;
+                        persist_set_highscore(s_games[i]->id, 0);
+                    }
                 s_confirm_reset = false;
                 fx_flash();
             }
@@ -271,6 +291,8 @@ void engine_on_player_connect(int player)
 void engine_on_player_disconnect(int player)
 {
     xSemaphoreTake(s_engine_mutex, portMAX_DELAY);
+    if (s_app == APP_PLAYING && s_active && s_active->on_leave)
+        s_active->on_leave(player);
     if (s_app == APP_PLAYING && s_active && s_active->min_players >= 2) {
         // The remaining player wins the round.
         s_last_winner = (player == 0) ? 1 : 0;
@@ -316,7 +338,7 @@ static void render_menu(void)
     gfx_text(3, 2, "GAMEBOX", 0xF);
     if (idx < N_GAMES && s_games[idx]->scored) {
         char hs[12];
-        snprintf(hs, sizeof hs, "HI %d", persist_get_highscore(s_games[idx]->id));
+        snprintf(hs, sizeof hs, "HI %d", s_best[idx]);
         gfx_text(60, 2, hs, 0xC);
     }
     int players = net_player_count();
@@ -362,7 +384,7 @@ static void render_scores(void)
     for (int i = 0; i < N_GAMES; i++) {
         gfx_text(8, y, s_games[i]->title, 0xC);
         if (s_games[i]->scored)
-            snprintf(val, sizeof val, "%d", persist_get_highscore(s_games[i]->id));
+            snprintf(val, sizeof val, "%d", s_best[i]);
         else
             snprintf(val, sizeof val, "-");
         gfx_text(SCREEN_WIDTH - 8 - (int)strlen(val) * 6, y, val, 0xF);
@@ -397,6 +419,15 @@ static void render_attract(void)
     center_text(64, net_ssid(), 0xF);
     center_text(74, "gamebox.local", 0xF);   // mDNS name (phones)
     center_text(84, "192.168.4.1", 0x6);      // IP fallback
+}
+
+// Over a game frozen because P1's phone dropped.
+static void render_paused(void)
+{
+    gfx_rect(14, 30, SCREEN_WIDTH - 28, 36, 0x0);
+    gfx_frame(14, 30, SCREEN_WIDTH - 28, 36, 0xF);
+    center_text_scaled(34, "PAUSED", 0xF, 2);
+    center_text(54, "WAITING FOR P1", ((s_anim_ms / 400) & 1) ? 0xC : 0x6);
 }
 
 static void render_gameover(void)
@@ -449,7 +480,10 @@ void engine_render(void)
         if (net_player_count() == 0) render_attract();   // idle: nobody connected
         else                         render_menu();
         break;
-    case APP_PLAYING:  if (a) a->render();    break;
+    case APP_PLAYING:
+        if (a) a->render();
+        if (!net_player_connected(0)) render_paused();
+        break;
     case APP_GAMEOVER: render_gameover();     break;
     case APP_SCORES:   render_scores();       break;
     case APP_DEMO:

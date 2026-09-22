@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 
@@ -19,6 +20,9 @@ const char *net_ssid(void);
 
 // Number of currently connected WebSocket clients (= occupied player slots).
 int  net_player_count(void);
+
+// Is this player slot's phone currently connected?
+bool net_player_connected(int player);
 
 // Broadcast typed messages to all connected phones. Safe to call while the
 // engine mutex is held (these only touch the fd table + copied strings).
